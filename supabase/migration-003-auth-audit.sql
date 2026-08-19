@@ -78,6 +78,34 @@ create or replace function public.user_role() returns text
 language sql stable security definer set search_path = public as
 $$ select primary_role from profiles where id = auth.uid() and active $$;
 
+-- ─── Явная операция выдачи роли администратором ────────────────────
+-- Если выдаваемая роль совпадает с текущей primary — строка КОНВЕРТИРУЕТСЯ
+-- в manual (независимая выдача переживёт последующую смену primary_role).
+create or replace function public.admin_grant_role(target uuid, r text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.has_any_role('admin') then
+    raise exception 'only admin can grant roles';
+  end if;
+  insert into user_roles (user_id, role, source) values (target, r, 'manual')
+  on conflict (user_id, role) do update set source = 'manual';
+end $$;
+
+-- Отзыв роли: manual-строка удаляется; если роль является текущей primary —
+-- строка не удаляется, а понижается обратно до source='primary'.
+create or replace function public.admin_revoke_role(target uuid, r text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.has_any_role('admin') then
+    raise exception 'only admin can revoke roles';
+  end if;
+  if exists (select 1 from profiles where id = target and primary_role = r) then
+    update user_roles set source = 'primary' where user_id = target and role = r;
+  else
+    delete from user_roles where user_id = target and role = r;
+  end if;
+end $$;
+
 -- Автосоздание профиля при регистрации (primary_role по умолчанию 'ops')
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -183,5 +211,23 @@ drop policy if exists audit_read on audit_log;
 create policy audit_read on audit_log for select using (public.has_any_role('ceo','admin'));
 -- Политик на запись НЕТ: пишет только security definer триггер.
 -- actor хранится как uuid без FK на profiles: история аудита переживает удаление пользователя.
+
+-- ─── Минимизация прав на функции (по ревью, пункт 3) ───────────────
+-- Триггерные и служебные функции недоступны для прямого вызова кем-либо:
+revoke execute on function public.sync_primary_role() from public, anon, authenticated;
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
+revoke execute on function public.audit_change() from public, anon, authenticated;
+-- Функции проверки прав нужны политикам RLS (выполняются под ролью запроса):
+revoke execute on function public.is_employee() from public;
+revoke execute on function public.has_any_role(variadic text[]) from public;
+revoke execute on function public.user_role() from public;
+grant execute on function public.is_employee() to authenticated, anon;
+grant execute on function public.has_any_role(variadic text[]) to authenticated, anon;
+grant execute on function public.user_role() to authenticated, anon;
+-- Админ-операции: вызывать может любой залогиненный, внутри — проверка admin:
+revoke execute on function public.admin_grant_role(uuid, text) from public, anon;
+revoke execute on function public.admin_revoke_role(uuid, text) from public, anon;
+grant execute on function public.admin_grant_role(uuid, text) to authenticated;
+grant execute on function public.admin_revoke_role(uuid, text) to authenticated;
 
 notify pgrst, 'reload schema';
