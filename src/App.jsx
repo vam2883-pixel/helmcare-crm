@@ -615,11 +615,14 @@ function MachinesSection({ user }) {
   // ── локации
   const zohoLocations = MACHINES_DB.map(a => ({
     id: a.id,
-    name: a.Account_Name || '—',
-    type: a.Account_Type || 'Партнёр',
-    city: a.Billing_City || a.Account_Site || '—',
-    phone: a.Phone || '—',
-    lastActivity: a.Last_Activity_Time ? new Date(a.Last_Activity_Time).toLocaleDateString('ru') : '—',
+    name: a.place || a.id,
+    type: a.status === 'online' ? 'Online' : a.status === 'repair' ? 'Ремонт' : 'Offline',
+    status: a.status,
+    city: a.city || a.addr || '—',
+    wm: a.wm || 0,
+    rm: a.rm || 0,
+    up: a.up || 0,
+    notes: a.notes || '',
   }));
 
   // ── mock агрегация (до появления телеметрии) ───────────────────────────────
@@ -737,17 +740,18 @@ function MachinesSection({ user }) {
             <div style={{fontSize:12,color:C.muted,marginBottom:20}}>{loc.type} · {loc.city}</div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
               <div style={CS}>
-                {[['Тип',loc.type],['Город',loc.city],['Телефон',loc.phone],['Последняя активность',loc.lastActivity]].map(([k,v])=>(
+                {[['Статус',loc.type],['Город',loc.city],['Выручка за 30 дней',`${loc.rm.toLocaleString('ru')} Rp`],['Дней с мойками (30 дн)',`${Math.round(loc.up*30/100)} / 30`]].map(([k,v])=>(
                   <div key={k} style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
                     <span style={{color:C.muted,fontSize:12}}>{k}</span>
                     <span style={{color:C.text,fontSize:12,fontWeight:600}}>{v}</span>
                   </div>
                 ))}
+                {loc.notes && <div style={{fontSize:11,color:C.dim,marginTop:8,paddingTop:8,borderTop:`1px solid ${C.border}`}}>{loc.notes}</div>}
               </div>
               <div style={CS}>
-                <div style={{fontSize:11,color:C.muted,marginBottom:12,textTransform:'uppercase'}}>Сделки</div>
-                <div style={{fontSize:28,fontWeight:800,color:C.cyan}}>{locDeals.length}</div>
-                <div style={{fontSize:12,color:C.muted}}>всего сделок</div>
+                <div style={{fontSize:11,color:C.muted,marginBottom:12,textTransform:'uppercase'}}>Мойки за 30 дней</div>
+                <div style={{fontSize:28,fontWeight:800,color:C.cyan}}>{loc.wm}</div>
+                <div style={{fontSize:12,color:C.muted}}>~{(loc.wm/30).toFixed(1)} в день</div>
               </div>
             </div>
           </div>
@@ -768,10 +772,10 @@ function MachinesSection({ user }) {
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:16}}>
               {[
-                { l:'Локации (Accounts)', v:MACHINES_DB.length,     c:C.cyan,   sub:'партнёры и точки' },
-                { l:'Всего сделок',        v:totalZohoDeals,           c:C.blue,   sub:'в воронке' },
-                { l:'Закрыто (Contract)', v:wonZohoDeals,             c:C.green,  sub:'Contract/Deposit' },
-                { l:'Выручка закрытых',   v:fmtRp(totalZohoRevenue),  c:C.amber,  sub:'Rp · реальные оплаты' },
+                { l:'Автоматов',           v:total,                                        c:C.cyan,  sub:'всего в сети' },
+                { l:'Online / Offline',    v:`${online.length} / ${offline.length+repair.length}`, c:C.green, sub:'по последней мойке' },
+                { l:'Моек за 30 дней',     v:machines.reduce((s,m)=>s+(m.wm||0),0),        c:C.blue,  sub:'платные + промо' },
+                { l:'Выручка за 30 дней',  v:fmtRp(totalRevMonth),                         c:C.amber, sub:'Rp · продажи' },
               ].map(s=>(
                 <div key={s.l} style={{textAlign:'center'}}>
                   <div style={{fontSize:10,color:C.muted,marginBottom:4,textTransform:'uppercase'}}>{s.l}</div>
@@ -810,9 +814,12 @@ function MachinesSection({ user }) {
                     borderRadius:10,cursor:'pointer',transition:'all .15s'}}
                   onMouseEnter={e=>e.currentTarget.style.borderColor=`${C.cyan}55`}
                   onMouseLeave={e=>e.currentTarget.style.borderColor=`${C.cyan}22`}>
-                  <div style={{fontSize:12,fontWeight:700,color:C.text,marginBottom:2}}>{loc.name}</div>
-                  <div style={{fontSize:11,color:C.muted}}>{loc.city || loc.type}</div>
-                  <div style={{fontSize:10,color:C.dim,marginTop:2}}>Активность: {loc.lastActivity}</div>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                    <div style={{width:7,height:7,borderRadius:'50%',flexShrink:0,background:loc.status==='online'?C.green:loc.status==='repair'?C.amber:C.red}}/>
+                    <div style={{fontSize:12,fontWeight:700,color:C.text}}>{loc.name}</div>
+                  </div>
+                  <div style={{fontSize:11,color:C.muted}}>{loc.city}</div>
+                  <div style={{fontSize:10,color:C.dim,marginTop:2}}>{loc.wm} моек · {Math.round(loc.rm/1000)}к Rp за 30 дн</div>
                 </div>
               ))}
             </div>
