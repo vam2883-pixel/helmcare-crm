@@ -124,9 +124,13 @@ notify pgrst, 'reload schema';
 -- curl anon-ключом: select → пусто/401, insert → 401/403 (см. план, раздел «Верификация»)
 
 -- ═══ ЭКСТРЕННЫЙ ОТКАТ (migration-007-down) ═════════════════════════
--- SQL Editor работает под service_role и НЕ подчиняется RLS — доступ не потеряется.
--- Вернуть открытый режим (временно!):
--- do $$ declare t text; begin
---   foreach t in array array['machines', ... /* список из шага 1 */] loop
---     execute format('create policy "open_access" on %I for all using (true) with check (true)', t);
---   end loop; end $$;
+-- Поправка №8: open_access НЕ является механизмом отката в проде.
+-- SQL Editor работает под service_role и НЕ подчиняется RLS — доступ админа не теряется.
+-- Порядок при инциденте после 007:
+--   1) Откатить фронтенд на предыдущий деплой (Vercel Instant Rollback)
+--   2) Диагностировать конкретную политику через SQL Editor
+--   3) Точечно поправить ТОЛЬКО затронутую политику (например, вернуть select
+--      конкретной таблице: create policy r_all on <t> for select
+--      using (public.user_role() is not null);)
+--   4) При потере данных — восстановление из backups/<дата>/ (scripts/restore.mjs)
+-- Полное открытие open_access допускается только в локальной/тестовой среде.

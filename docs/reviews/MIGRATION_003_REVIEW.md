@@ -1,3 +1,9 @@
+# РЕВЬЮ: migration-003-auth-audit.sql
+_К применению ПОСЛЕ одобрения этого ревью · Бэкап сделан: backups/2026-08-19-09-46 (824 строки, 14 таблиц)_
+
+## 1. Полный SQL
+
+```sql
 -- ═══════════════════════════════════════════════════════════════════
 -- Миграция 003: профили (Supabase Auth) + мульти-роли + Audit Log
 -- P0.1 + P0.3 · Аддитивная, существующие таблицы не изменяет
@@ -149,3 +155,65 @@ create policy audit_read on audit_log for select using (public.has_any_role('ceo
 -- Политик на запись НЕТ: пишет только security definer триггер
 
 notify pgrst, 'reload schema';
+```
+
+## 2. Затрагиваемые таблицы
+
+| Таблица | Действие |
+|---|---|
+| `profiles` | **СОЗДАЁТСЯ** — сотрудники, основная роль |
+| `user_roles` | **СОЗДАЁТСЯ** — мульти-роли (поправка №6); основная роль синхронизируется триггером |
+| `audit_log` | **СОЗДАЁТСЯ** — журнал изменений + request_id/session_id (поправка №5) |
+| `auth.users` | триггер `on_auth_user_created` (автосоздание профиля) — данные не изменяются |
+| machines, franchise_leads, legal_contracts, contractors, app_settings | **только** навешивается audit-триггер; структура и данные НЕ меняются |
+
+Существующие данные: не читаются, не изменяются, не удаляются. Миграция чисто аддитивная.
+
+## 3. Влияние на RLS
+
+- **Существующие таблицы: без изменений.** open_access остаётся до 007 — приложение работает как раньше.
+- Новые таблицы закрыты сразу:
+  - `profiles`, `user_roles`: чтение — только залогиненные; запись — только admin
+  - `audit_log`: чтение — только ceo/admin; **политик на запись нет** — пишет только security definer триггер, подделать запись через REST нельзя
+- Функции `user_role()` / `has_any_role()` — security definer, безопасны для anon (вернут null/false)
+- ⚠️ Все будущие политики (007) используют `has_any_role()` → включение мульти-ролей не потребует их переписывания
+
+## 4. SQL отката
+
+```sql
+drop trigger if exists on_auth_user_created on auth.users;
+drop function if exists public.handle_new_user();
+do $$ declare t text; begin
+  foreach t in array array['machines','franchise_leads','legal_contracts','contractors',
+                           'app_settings','profiles','user_roles'] loop
+    execute format('drop trigger if exists audit_%I on %I', t, t);
+  end loop; end $$;
+drop function if exists public.audit_change();
+drop table if exists audit_log;
+drop function if exists public.has_any_role(variadic text[]);
+drop function if exists public.user_role();
+drop trigger if exists sync_primary_role on profiles;
+drop function if exists public.sync_primary_role();
+drop table if exists user_roles;
+drop table if exists profiles;
+notify pgrst, 'reload schema';
+```
+Откат полностью возвращает состояние «до 003»: существующие таблицы не были изменены, терять нечего.
+
+## 5. Чек-лист тестирования после применения
+
+- [ ] Приложение (прод) работает как раньше: вход, все разделы, CRUD лида — open_access не тронут
+- [ ] `select * from profiles` в SQL Editor — таблица существует, пуста
+- [ ] Создать тестового пользователя в Supabase Auth → в profiles автоматически появилась строка с role='ops'
+- [ ] `update profiles set role='admin' where email='<тест>'` → в user_roles автоматически строка ('admin'), старая роль удалена
+- [ ] Изменить лид через UI → в audit_log появилась запись UPDATE franchise_leads со old_data/new_data
+- [ ] Изменить цену (app_settings) → запись в audit_log
+- [ ] REST anon-ключом: `GET /profiles` → пусто (RLS), `GET /audit_log` → пусто, `POST /audit_log` → 401/403
+- [ ] REST anon-ключом: `GET /machines` → работает как раньше (80 строк) — ничего не сломали
+- [ ] Повторный прогон самой миграции — идемпотентна (if not exists/or replace), ошибок нет
+
+## 6. Риски
+
+- Низкие: миграция не трогает существующие данные и политики
+- Триггеры аудита добавляют ~1мс к записи в 5 таблиц — незаметно на наших объёмах
+- Функции security definer ограничены `set search_path = public` (защита от search_path-атак)
