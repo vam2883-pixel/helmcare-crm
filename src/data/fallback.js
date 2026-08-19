@@ -129,6 +129,9 @@ export let WASHES_TREND = [
   {d:"19.04",w:1842,r:184200},
 ];
 
+// Помесячная статистика моек по автоматам: {machine, month:'YYYY-MM', w, r}
+export let MACHINE_MONTHLY = [];
+
 export const REV_CHART = [
   {m:"Янв",a:724000,ad:48000,f:340000},{m:"Фев",a:698000,ad:52000,f:340000},
   {m:"Мар",a:891000,ad:61000,f:680000},{m:"Апр",a:747000,ad:70000,f:340000},
@@ -149,5 +152,6 @@ export function hydrate(d) {
   if (d.content?.length)      CONTENT_DB    = d.content;
   if (d.logs?.length)         LOGS_DB       = d.logs;
   if (d.washTrend?.length)    WASHES_TREND  = d.washTrend;
+  if (d.machineMonthly?.length) MACHINE_MONTHLY = d.machineMonthly;
   if (d.pricing?.modes)       PRICING_DB    = d.pricing;
 }

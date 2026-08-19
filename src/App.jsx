@@ -22,7 +22,7 @@ import {
   MACHINES_DB, TECHNICIANS, MARKETING_TEAM, ALL_MKT_MEMBERS,
   initCampaigns, initContractors, FR_LEADS, LEGAL_DB, DEV_DB,
   CLIENTS_DB, NOTIF_HISTORY, CONTENT_DB, PRICING_DB, LOGS_DB,
-  REPORTS_PERIODS, WASHES_TREND, REV_CHART,
+  REPORTS_PERIODS, WASHES_TREND, REV_CHART, MACHINE_MONTHLY,
 } from "./data/fallback.js";
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -622,8 +622,40 @@ function MachinesSection({ user }) {
     wm: a.wm || 0,
     rm: a.rm || 0,
     up: a.up || 0,
+    wt: a.wt || 0,
+    rt: a.rt || 0,
+    lastWash: a.last_wash || null,
     notes: a.notes || '',
   }));
+
+  // ── сортировка и период списка локаций ────────────────────────────────────
+  const [locSort, setLocSort]     = useState('washes');   // washes|revenue|lastWash|number|name|status
+  const [locPeriod, setLocPeriod] = useState('30d');      // '30d' | 'total' | 'YYYY-MM'
+  const RU_MON = {'01':'Январь','02':'Февраль','03':'Март','04':'Апрель','05':'Май','06':'Июнь',
+                  '07':'Июль','08':'Август','09':'Сентябрь','10':'Октябрь','11':'Ноябрь','12':'Декабрь'};
+  const monthLabel = m => `${RU_MON[m.slice(5)]} ${m.slice(0,4)}`;
+  const locMonths = [...new Set(MACHINE_MONTHLY.map(x => x.month))].sort().reverse();
+  const monthStat = {};
+  MACHINE_MONTHLY.forEach(x => { (monthStat[x.month] = monthStat[x.month] || {})[x.machine] = x; });
+
+  const locList = zohoLocations.map(l => {
+    const s = locPeriod === '30d'   ? { w: l.wm, r: l.rm }
+            : locPeriod === 'total' ? { w: l.wt, r: l.rt }
+            : (monthStat[locPeriod]?.[l.id] || { w: 0, r: 0 });
+    return { ...l, sw: s.w || 0, sr: s.r || 0 };
+  }).sort((a, b) => {
+    switch (locSort) {
+      case 'revenue':  return b.sr - a.sr;
+      case 'lastWash': return String(b.lastWash || '').localeCompare(String(a.lastWash || ''));
+      case 'number':   return a.id.localeCompare(b.id);
+      case 'name':     return a.name.localeCompare(b.name, 'ru');
+      case 'status':   return (a.status === 'online' ? 0 : 1) - (b.status === 'online' ? 0 : 1) || b.sw - a.sw;
+      default:         return b.sw - a.sw; // washes
+    }
+  });
+  const locPeriodLabel = locPeriod === '30d' ? 'за 30 дн' : locPeriod === 'total' ? 'за всё время' : `за ${monthLabel(locPeriod).toLowerCase()}`;
+  const selStyle = { background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 8,
+    padding: '6px 10px', color: C.text, fontSize: 11, outline: 'none', cursor: 'pointer' };
 
   // ── mock агрегация (до появления телеметрии) ───────────────────────────────
   const total      = machines.length;
@@ -804,11 +836,26 @@ function MachinesSection({ user }) {
 
           {/* ── локации ────────────────────────────────────────────────── */}
           <div style={{...CS, marginBottom:16}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
               <div style={{fontSize:12,fontWeight:600,color:C.text}}>Локации ({zohoLocations.length})</div>
+              <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                <select value={locPeriod} onChange={e=>setLocPeriod(e.target.value)} style={selStyle}>
+                  <option value="30d">Последние 30 дней</option>
+                  <option value="total">За всё время</option>
+                  {locMonths.map(m=><option key={m} value={m}>{monthLabel(m)}</option>)}
+                </select>
+                <select value={locSort} onChange={e=>setLocSort(e.target.value)} style={selStyle}>
+                  <option value="washes">↓ По мойкам</option>
+                  <option value="revenue">↓ По выручке</option>
+                  <option value="lastWash">↓ По последней мойке</option>
+                  <option value="status">Online первые</option>
+                  <option value="number">По номеру</option>
+                  <option value="name">По названию</option>
+                </select>
+              </div>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(200px,1fr))',gap:8}}>
-              {zohoLocations.map(loc=>(
+              {locList.map(loc=>(
                 <div key={loc.id} onClick={()=>drill('loc-'+loc.id)}
                   style={{padding:'10px 12px',background:`${C.cyan}08`,border:`1px solid ${C.cyan}22`,
                     borderRadius:10,cursor:'pointer',transition:'all .15s'}}
@@ -819,7 +866,8 @@ function MachinesSection({ user }) {
                     <div style={{fontSize:12,fontWeight:700,color:C.text}}>{loc.name}</div>
                   </div>
                   <div style={{fontSize:11,color:C.muted}}>{loc.city}</div>
-                  <div style={{fontSize:10,color:C.dim,marginTop:2}}>{loc.wm} моек · {Math.round(loc.rm/1000)}к Rp за 30 дн</div>
+                  <div style={{fontSize:10,color:C.dim,marginTop:2}}>{loc.sw} моек · {Math.round(loc.sr/1000)}к Rp {locPeriodLabel}</div>
+                  {locSort==='lastWash' && <div style={{fontSize:10,color:C.dim}}>посл. мойка: {loc.lastWash || '—'}</div>}
                 </div>
               ))}
             </div>

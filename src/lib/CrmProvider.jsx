@@ -56,6 +56,7 @@ const TABLES = {
   content_items:   { key: "content",       order: "id" },
   machine_logs:    { key: "logs",          order: "id" },
   wash_stats:      { key: "washTrend",     order: "id" },
+  machine_monthly: { key: "machineMonthly", order: "id" },
 };
 
 const CrmCtx = createContext(null);
