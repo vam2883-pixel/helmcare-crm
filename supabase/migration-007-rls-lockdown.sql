@@ -7,8 +7,8 @@
 -- После применения anon-ключ теряет ВСЕ права: без логина данных нет.
 -- ═══════════════════════════════════════════════════════════════════
 
--- Хелперы читаемости
--- (public.user_role() создан в 003; null для anon → все проверки падают в false)
+-- Все проверки прав — через public.has_any_role() / public.is_employee() (из 003):
+-- авторитетный источник — user_roles; anon и деактивированные получают false.
 
 do $$
 declare t text;
@@ -34,7 +34,7 @@ begin
   ] loop
     execute format('drop policy if exists r_all on %I', t);
     execute format('create policy r_all on %I for select
-                    using (public.user_role() is not null)', t);
+                    using (public.is_employee())', t);
   end loop;
 end $$;
 
@@ -43,22 +43,22 @@ end $$;
 create or replace function public.can_write(tbl text) returns boolean
 language sql stable security definer set search_path = public as $$
   select case tbl
-    when 'machines'                 then public.user_role() in ('admin','ops','tech_manager')
-    when 'locations'                then public.user_role() in ('admin','ops')
-    when 'machine_location_history' then public.user_role() in ('admin','ops')
-    when 'technicians'              then public.user_role() in ('admin','tech_manager')
-    when 'machine_logs'             then public.user_role() in ('admin','tech_manager','technician')
-    when 'campaigns'                then public.user_role() in ('admin','marketing','commercial_director')
-    when 'contractors'              then public.user_role() in ('admin','dooh_sales','commercial_director')
-    when 'franchise_leads'          then public.user_role() in ('admin','franchise_sales','commercial_director')
-    when 'legal_contracts'          then public.user_role() in ('admin','legal')
-    when 'dev_projects'             then public.user_role() in ('admin','dev')
-    when 'clients'                  then public.user_role() in ('admin','marketing')
-    when 'notifications'            then public.user_role() in ('admin','marketing')
-    when 'content_items'            then public.user_role() in ('admin','marketing','ops')
-    when 'app_settings'             then public.user_role() in ('admin')
-    when 'wash_transactions'        then public.user_role() in ('admin')          -- только импорт
-    when 'import_log'               then public.user_role() in ('admin')
+    when 'machines'                 then public.has_any_role('admin','ops','tech_manager')
+    when 'locations'                then public.has_any_role('admin','ops')
+    when 'machine_location_history' then public.has_any_role('admin','ops')
+    when 'technicians'              then public.has_any_role('admin','tech_manager')
+    when 'machine_logs'             then public.has_any_role('admin','tech_manager','technician')
+    when 'campaigns'                then public.has_any_role('admin','marketing','commercial_director')
+    when 'contractors'              then public.has_any_role('admin','dooh_sales','commercial_director')
+    when 'franchise_leads'          then public.has_any_role('admin','franchise_sales','commercial_director')
+    when 'legal_contracts'          then public.has_any_role('admin','legal')
+    when 'dev_projects'             then public.has_any_role('admin','dev')
+    when 'clients'                  then public.has_any_role('admin','marketing')
+    when 'notifications'            then public.has_any_role('admin','marketing')
+    when 'content_items'            then public.has_any_role('admin','marketing','ops')
+    when 'app_settings'             then public.has_any_role('admin')
+    when 'wash_transactions'        then public.has_any_role('admin')          -- только импорт
+    when 'import_log'               then public.has_any_role('admin')
     when 'machine_monthly'          then false                                    -- только refresh_wash_aggregates()
     when 'wash_stats'               then false
     else false end $$;
@@ -88,35 +88,35 @@ begin
   foreach t in array array['invoices','payments','import_log'] loop
     execute format('drop policy if exists r_fin on %I', t);
     execute format('create policy r_fin on %I for select
-      using (public.user_role() in (''ceo'',''coo'',''finance'',''admin'',''commercial_director''))', t);
+      using (public.has_any_role(''ceo'',''coo'',''finance'',''admin'',''commercial_director''))', t);
   end loop;
   foreach t in array array['invoices','payments'] loop
     execute format('drop policy if exists w_fin on %I', t);
     execute format('create policy w_fin on %I for all
-      using (public.user_role() in (''finance'',''admin''))
-      with check (public.user_role() in (''finance'',''admin''))', t);
+      using (public.has_any_role(''finance'',''admin''))
+      with check (public.has_any_role(''finance'',''admin''))', t);
   end loop;
 end $$;
 
 -- 5. Задачи: создавать может любой сотрудник; менять — исполнитель/автор/админ/руководители
 drop policy if exists w_tasks on tasks;
-create policy w_tasks on tasks for insert with check (public.user_role() is not null);
+create policy w_tasks on tasks for insert with check (public.is_employee());
 drop policy if exists u_tasks on tasks;
 create policy u_tasks on tasks for update using (
   auth.uid() in (assignee, creator)
-  or public.user_role() in ('admin','ceo','coo','commercial_director','tech_manager'));
+  or public.has_any_role('admin','ceo','coo','commercial_director','tech_manager'));
 drop policy if exists d_tasks on tasks;
-create policy d_tasks on tasks for delete using (public.user_role() = 'admin');
+create policy d_tasks on tasks for delete using (public.has_any_role('admin'));
 
 drop policy if exists w_tc on task_comments;
-create policy w_tc on task_comments for insert with check (public.user_role() is not null);
+create policy w_tc on task_comments for insert with check (public.is_employee());
 drop policy if exists d_tc on task_comments;
 create policy d_tc on task_comments for delete
-  using (auth.uid() = author or public.user_role() = 'admin');
+  using (auth.uid() = author or public.has_any_role('admin'));
 drop policy if exists w_ta on task_attachments;
-create policy w_ta on task_attachments for insert with check (public.user_role() is not null);
+create policy w_ta on task_attachments for insert with check (public.is_employee());
 drop policy if exists w_tact on task_activity;
-create policy w_tact on task_activity for insert with check (public.user_role() is not null);
+create policy w_tact on task_activity for insert with check (public.is_employee());
 
 notify pgrst, 'reload schema';
 
@@ -131,6 +131,6 @@ notify pgrst, 'reload schema';
 --   2) Диагностировать конкретную политику через SQL Editor
 --   3) Точечно поправить ТОЛЬКО затронутую политику (например, вернуть select
 --      конкретной таблице: create policy r_all on <t> for select
---      using (public.user_role() is not null);)
+--      using (public.is_employee());)
 --   4) При потере данных — восстановление из backups/<дата>/ (scripts/restore.mjs)
 -- Полное открытие open_access допускается только в локальной/тестовой среде.

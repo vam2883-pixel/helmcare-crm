@@ -1,63 +1,84 @@
 -- ═══════════════════════════════════════════════════════════════════
 -- Миграция 003: профили (Supabase Auth) + мульти-роли + Audit Log
 -- P0.1 + P0.3 · Аддитивная, существующие таблицы не изменяет
--- Ревизия 2: поправки №5 (correlation id), №6 (мульти-роли)
+-- Ревизия 3 (по ревью):
+--   · profiles.primary_role (переименовано из role)
+--   · user_roles — ЕДИНСТВЕННЫЙ источник прав (авторитетный)
+--   · синхронизация не трогает независимо выданные роли (source='manual')
+--   · active=false мгновенно обнуляет все права
+--   · request_id/session_id — ТОЛЬКО диагностика, не авторизация
 -- ═══════════════════════════════════════════════════════════════════
 
 -- ─── Профили сотрудников ───────────────────────────────────────────
 create table if not exists profiles (
-  id         uuid primary key references auth.users(id) on delete cascade,
-  email      text unique not null,
-  name       text not null,
-  role       text not null default 'ops' check (role in
+  id           uuid primary key references auth.users(id) on delete cascade,
+  email        text unique not null,
+  name         text not null,
+  primary_role text not null default 'ops' check (primary_role in
     ('ceo','coo','commercial_director','marketing','franchise_sales','dooh_sales',
      'tech_manager','technician','finance','legal','dev','ops','admin')),
-  avatar     text,
-  active     boolean not null default true,
-  created_at timestamptz default now()
+  avatar       text,
+  active       boolean not null default true,
+  created_at   timestamptz default now()
 );
--- profiles.role = ОСНОВНАЯ роль (MVP). Поправка №6: дополнительные роли — в user_roles.
+-- primary_role — отображаемая «должность» (дашборд по умолчанию, подпись в UI).
+-- ПРАВА из неё НЕ читаются. Права — только из user_roles (см. has_any_role).
 
+-- ─── Роли: авторитетный источник прав ──────────────────────────────
+-- source='primary' — строка создана синхронизацией из profiles.primary_role
+-- source='manual'  — роль выдана администратором независимо
 create table if not exists user_roles (
   user_id    uuid not null references profiles(id) on delete cascade,
   role       text not null check (role in
     ('ceo','coo','commercial_director','marketing','franchise_sales','dooh_sales',
      'tech_manager','technician','finance','legal','dev','ops','admin')),
+  source     text not null default 'manual' check (source in ('primary','manual')),
   granted_at timestamptz default now(),
   primary key (user_id, role)
 );
 
--- Синхронизация: основная роль всегда присутствует в user_roles
+-- ─── Синхронизация primary_role → user_roles ───────────────────────
+-- Гарантии:
+--   1) primary_role всегда представлена в user_roles;
+--   2) смена primary_role удаляет ТОЛЬКО авто-строку старой роли (source='primary');
+--      роли, выданные вручную (source='manual'), никогда не удаляются синхронизацией;
+--   3) если новая primary_role уже выдана вручную — строка остаётся 'manual'
+--      (роль останется у пользователя, даже когда primary сменится ещё раз).
 create or replace function public.sync_primary_role() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
-  insert into user_roles (user_id, role) values (new.id, new.role)
-  on conflict do nothing;
-  if tg_op = 'UPDATE' and old.role is distinct from new.role then
-    delete from user_roles where user_id = new.id and role = old.role;
-    insert into user_roles (user_id, role) values (new.id, new.role)
-    on conflict do nothing;
+  if tg_op = 'UPDATE' and old.primary_role is distinct from new.primary_role then
+    delete from user_roles
+      where user_id = new.id and role = old.primary_role and source = 'primary';
   end if;
+  insert into user_roles (user_id, role, source)
+  values (new.id, new.primary_role, 'primary')
+  on conflict (user_id, role) do nothing;   -- существующая manual-строка не понижается
   return new;
 end $$;
 drop trigger if exists sync_primary_role on profiles;
-create trigger sync_primary_role after insert or update of role on profiles
+create trigger sync_primary_role after insert or update of primary_role on profiles
   for each row execute function public.sync_primary_role();
 
--- ─── Функции проверки ролей (единый интерфейс для всех RLS-политик) ─
--- Все будущие политики используют has_any_role(...) → переход на
--- мульти-роли не потребует переписывания политик.
-create or replace function public.user_role() returns text
+-- ─── Функции проверки прав (единый интерфейс всех RLS-политик) ─────
+-- active=false → сотрудник мгновенно теряет ВСЕ права (обе функции).
+create or replace function public.is_employee() returns boolean
 language sql stable security definer set search_path = public as
-$$ select role from profiles where id = auth.uid() and active $$;
+$$ select exists (select 1 from profiles where id = auth.uid() and active) $$;
 
 create or replace function public.has_any_role(variadic roles text[]) returns boolean
 language sql stable security definer set search_path = public as
 $$ select exists (
-     select 1 from user_roles ur join profiles p on p.id = ur.user_id
+     select 1 from user_roles ur
+     join profiles p on p.id = ur.user_id
      where ur.user_id = auth.uid() and p.active and ur.role = any(roles)) $$;
 
--- Автосоздание профиля при регистрации (роль по умолчанию ops; admin меняет)
+-- Отображаемая роль (для UI; НЕ использовать в политиках доступа)
+create or replace function public.user_role() returns text
+language sql stable security definer set search_path = public as
+$$ select primary_role from profiles where id = auth.uid() and active $$;
+
+-- Автосоздание профиля при регистрации (primary_role по умолчанию 'ops')
 create or replace function public.handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
@@ -71,6 +92,15 @@ create trigger on_auth_user_created after insert on auth.users
   for each row execute function public.handle_new_user();
 
 -- ─── Audit Log ─────────────────────────────────────────────────────
+-- ВАЖНО (политика применения):
+--   · audit_change() копирует ПОЛНУЮ строку в audit_log. ЗАПРЕЩЕНО вешать этот
+--     триггер на таблицы с паролями, токенами, секретами и прочими credentials —
+--     для таких таблиц (если появятся) нужен отдельный триггер с маскированием.
+--   · request_id/session_id — диагностические поля корреляции. Приходят от клиента,
+--     могут быть подделаны. НИКОГДА не использовать их в авторизации/безопасности.
+--   · Отказ записи аудита РОНЯЕТ исходную транзакцию (исключение не глотается):
+--     критичное изменение без аудита невозможно.
+--   · Рекурсия исключена: на audit_log аудит-триггер не вешается.
 create table if not exists audit_log (
   id          bigint generated by default as identity primary key,
   actor       uuid,
@@ -80,8 +110,8 @@ create table if not exists audit_log (
   object_id   text,
   old_data    jsonb,
   new_data    jsonb,
-  request_id  text,                   -- поправка №5: x-request-id из заголовков PostgREST
-  session_id  text,                   -- x-client-session (шлёт фронтенд)
+  request_id  text,                   -- диагностика (x-request-id), не авторизация
+  session_id  text,                   -- диагностика (x-client-session), не авторизация
   at          timestamptz default now()
 );
 create index if not exists audit_log_table_at on audit_log(table_name, at desc);
@@ -95,6 +125,7 @@ declare
 begin
   oid := coalesce(
     case when tg_op = 'DELETE' then (to_jsonb(old)->>'id') else (to_jsonb(new)->>'id') end, '');
+  -- только парсинг заголовков защищён; сам insert НЕ защищён намеренно (см. политику выше)
   begin
     hdrs := nullif(current_setting('request.headers', true), '')::jsonb;
   exception when others then hdrs := null;
@@ -113,8 +144,9 @@ begin
   return coalesce(new, old);
 end $$;
 
--- Аудит существующих чувствительных таблиц
--- (новые таблицы подключают триггер в собственных миграциях)
+-- Аудит существующих чувствительных таблиц + ролевых таблиц.
+-- Ни одна из них не содержит credentials (профили — без паролей, пароли в auth.users,
+-- управляется Supabase и НЕ аудируется этим триггером).
 do $$
 declare t text;
 begin
@@ -131,21 +163,25 @@ end $$;
 -- (существующие таблицы не трогаем — их open_access закрывается в 007)
 alter table profiles enable row level security;
 drop policy if exists profiles_read on profiles;
-create policy profiles_read on profiles for select using (auth.role() = 'authenticated');
+create policy profiles_read on profiles for select using (public.is_employee());
 drop policy if exists profiles_admin_write on profiles;
 create policy profiles_admin_write on profiles for all
   using (public.has_any_role('admin')) with check (public.has_any_role('admin'));
+-- Тест D: обычный сотрудник НЕ может менять primary_role (нет политики update для не-админа)
 
 alter table user_roles enable row level security;
 drop policy if exists user_roles_read on user_roles;
-create policy user_roles_read on user_roles for select using (auth.role() = 'authenticated');
+create policy user_roles_read on user_roles for select using (public.is_employee());
 drop policy if exists user_roles_admin_write on user_roles;
 create policy user_roles_admin_write on user_roles for all
   using (public.has_any_role('admin')) with check (public.has_any_role('admin'));
+-- Тест D: самовыдача ролей невозможна — insert/update/delete только admin;
+-- синхронизация из primary_role работает через security definer триггер.
 
 alter table audit_log enable row level security;
 drop policy if exists audit_read on audit_log;
 create policy audit_read on audit_log for select using (public.has_any_role('ceo','admin'));
--- Политик на запись НЕТ: пишет только security definer триггер
+-- Политик на запись НЕТ: пишет только security definer триггер.
+-- actor хранится как uuid без FK на profiles: история аудита переживает удаление пользователя.
 
 notify pgrst, 'reload schema';
